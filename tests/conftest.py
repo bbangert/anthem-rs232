@@ -7,16 +7,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import anthem_rs232
+import anthem_rs232.gen1.receiver as gen1_receiver
 import anthem_rs232.receiver as anthem_receiver
 from anthem_rs232 import AnthemReceiver
 from anthem_rs232.models import ReceiverModel
 
-# Speed up tests by reducing delays. request_timeout is a serialkit class
-# attribute fixed at import, so override it on the class (patching the module
-# constant no longer affects it).
+# Speed up tests. Both constants are read at construction/call time, so
+# rebinding them on the module is enough. Pacing in particular matters: the
+# real 30 ms inter-command margin would put a ~35-query query_state() over the
+# per-test timeout on its own.
 anthem_rs232.COMMAND_TIMEOUT = 0.1
 anthem_receiver.COMMAND_TIMEOUT = 0.1
-AnthemReceiver.request_timeout = 0.1
+anthem_receiver.INTER_COMMAND_DELAY = 0.0
+gen1_receiver.INTER_COMMAND_DELAY = 0.0
+gen1_receiver.COMMAND_TIMEOUT = 0.1
 
 # Default responses for query prefixes used during connect()/query_state().
 # Each entry maps the queried prefix to a list of full response messages

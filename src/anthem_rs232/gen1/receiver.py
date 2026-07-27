@@ -3,23 +3,24 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 import serialx
 from serialkit import (
+    Backoff,
     CommandTimeoutError,
     DelimiterFramer,
-    ProbeSpec,
+    IdleProbe,
+    Pacing,
     ProtocolError,
-    SerialDevice,
 )
 
+from .._runtime import ReceiverRuntime
 from .const import (
     COMMAND_TIMEOUT,
-    WATCHDOG_INTERVAL,
-    WATCHDOG_PROBE_ATTEMPTS,
     HEADPHONE_VOLUME_STEP,
+    INTER_COMMAND_DELAY,
     MAIN_VOLUME_STEP,
     MAX_AM_FREQUENCY,
     MAX_FM_FREQUENCY,
@@ -27,6 +28,8 @@ from .const import (
     MIN_FM_FREQUENCY,
     TERMINATOR,
     TRIM_STEP,
+    WATCHDOG_INTERVAL,
+    WATCHDOG_PROBE_ATTEMPTS,
     ZONE2_TONE_STEP,
     ZONE2_VOLUME_STEP,
     DecoderMode,
@@ -82,28 +85,17 @@ class Gen1CommandError(ProtocolError):
         self.phrase = phrase
 
 
-class Gen1Receiver(SerialDevice[Gen1ReceiverState]):
+class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
     """Async controller for an Anthem Gen 1 receiver over RS232.
 
     Supports Statement D1/D2/D2v, AVM 20/30/40/50/50v, and MRX 300/500/700.
     Pass a ``Gen1ReceiverModel`` so the receiver knows the correct baud rate
     and source map; defaults to a generic 9600-baud configuration.
 
-    Built on serialkit: framing (``\\n`` terminator with inline ``;`` split,
-    NUL scrub), matcher-based query correlation, the read loop, an idle-window
-    watchdog, and reconnect are provided by :class:`serialkit.SerialDevice`.
+    Owns a :class:`serialkit.SerialLink`, which provides framing (``\\n``
+    terminator with inline ``;`` split, NUL scrub), the read loop, pacing, an
+    idle-window watchdog and reconnect.
     """
-
-    framer_factory = staticmethod(lambda: DelimiterFramer(TERMINATOR, strip=b"\x00"))
-    request_timeout = COMMAND_TIMEOUT
-    # The ``?`` identify query is answered in any power state; any RX (incl. an
-    # error reply) counts as alive. attempts covers a sleeping unit eating the
-    # first frame as MCU wake-up.
-    probe = ProbeSpec(
-        frame=b"?" + TERMINATOR,
-        idle=WATCHDOG_INTERVAL,
-        attempts=WATCHDOG_PROBE_ATTEMPTS,
-    )
 
     def __init__(
         self,
@@ -111,19 +103,34 @@ class Gen1Receiver(SerialDevice[Gen1ReceiverState]):
         model: Gen1ReceiverModel | None = None,
         *,
         baud_rate: int | None = None,
+        command_timeout: float | None = None,
+        backoff: Backoff | None = None,
+        connect: Callable[[], Awaitable[tuple[object, object]]] | None = None,
     ) -> None:
         self._port = port
         self._model = model
+        self._command_timeout_override = command_timeout
         if baud_rate is not None:
             self._baud_rate = baud_rate
         elif model is not None:
             self._baud_rate = model.baud_rate
         else:
             self._baud_rate = 9600
-        super().__init__(self._open_connection)
-        # A state object before start() so player/property reads work
-        # pre-connect; serialkit rebuilds it via make_state() per connection.
-        self.state = self.make_state()
+        super().__init__(
+            state=Gen1ReceiverState(),
+            connect=connect or self._open_connection,
+            framer=DelimiterFramer(TERMINATOR, strip=b"\x00"),
+            pacing=Pacing(min_interval=INTER_COMMAND_DELAY),
+            # The ``?`` identify query is answered in any power state, and any
+            # RX (including an error reply) counts as alive. attempts covers a
+            # sleeping unit eating the first frame as MCU wake-up.
+            liveness=IdleProbe(
+                idle=WATCHDOG_INTERVAL,
+                probe=b"?" + TERMINATOR,
+                attempts=WATCHDOG_PROBE_ATTEMPTS,
+            ),
+            backoff=backoff,
+        )
 
         self.main = MainPlayer(self)
         self.zone_2 = Zone2Player(self)
@@ -148,20 +155,16 @@ class Gen1Receiver(SerialDevice[Gen1ReceiverState]):
 
     # -- serialkit lifecycle callbacks -----------------------------------
 
-    def make_state(self) -> Gen1ReceiverState:
-        return Gen1ReceiverState()
-
-    def copy_state(self, state: Gen1ReceiverState) -> Gen1ReceiverState:
-        return state.copy()
+    @property
+    def _timeout(self) -> float:
+        """Per-command deadline, re-read so tests can shrink the constant."""
+        if self._command_timeout_override is not None:
+            return self._command_timeout_override
+        return COMMAND_TIMEOUT
 
     @property
     def _state(self) -> Gen1ReceiverState:
-        """The live receiver state.
-
-        Read-through so the dispatcher and the zone players always see the
-        current connection's state object (serialkit rebuilds it on reconnect).
-        """
-        assert self.state is not None
+        """The live receiver state, which the dispatcher and players mutate."""
         return self.state
 
     async def on_connect(self) -> None:
@@ -185,8 +188,9 @@ class Gen1Receiver(SerialDevice[Gen1ReceiverState]):
     def on_frame(self, frame: bytes) -> None:
         """Route one framed line, splitting inline ``;``-chained messages.
 
-        Order: error -> reject the oldest pending; else apply state -> resolve
-        the first pending whose matcher accepts the frame.
+        An error fails whatever is waiting; anything else is applied to the
+        state. A waiter for this frame resolves independently — ``expect``
+        observes without consuming, so a reply is both an answer and an event.
         """
         for part in frame.split(b";"):
             message = part.decode("ascii", errors="replace").strip()
@@ -194,24 +198,23 @@ class Gen1Receiver(SerialDevice[Gen1ReceiverState]):
                 continue
             err = match_error(message)
             if err is not None:
-                # Gen 1 errors carry no correlating content; reject the oldest
-                # in-flight query (or log if none is pending).
-                if not self.pending.reject_oldest(Gen1CommandError(err)):
-                    _LOGGER.warning("Unsolicited error from receiver: %s", err)
+                # Gen 1 errors are bare English phrases carrying no echo of the
+                # failing command, so there is nothing to attribute them to
+                # beyond "whatever is waiting now".
+                self.link.report_error(Gen1CommandError(err))
                 continue
             if self._apply_event(message):
                 self.notify()
-            self.pending.feed(part)
 
-    # -- Lifecycle (aliases over serialkit start/stop) -------------------
+    # -- Lifecycle -------------------------------------------------------
 
     async def connect(self) -> None:
         """Open the serial port, identify, and enable Tx Status reports."""
-        await self.start()
+        await self.link.start()
         _LOGGER.info("Connected to Anthem Gen 1 receiver on %s", self._port)
 
     async def disconnect(self) -> None:
-        await self.stop()
+        await self.link.stop()
         _LOGGER.info("Disconnected from Anthem Gen 1 receiver")
 
     # -- Identify --------------------------------------------------------
@@ -319,7 +322,7 @@ class Gen1Receiver(SerialDevice[Gen1ReceiverState]):
 
     async def _send(self, command: bytes) -> None:
         """Write a raw command to the wire (the LF terminator is appended)."""
-        await self.send(command + TERMINATOR)
+        await self.link.send(command + TERMINATOR)
 
     async def _query(
         self,
@@ -331,20 +334,19 @@ class Gen1Receiver(SerialDevice[Gen1ReceiverState]):
         """Send a query and wait for a frame the ``matcher`` callable accepts.
 
         Gen 1 matchers return a decoded value (or ``None`` for no match); the
-        serialkit tracker wants a bool, so we bridge and re-run the matcher on
-        the resolved frame to return its decoded value.
+        predicate wants a bool, so we bridge and re-run the matcher on the
+        resolved frame to return its decoded value. The reply is observed, not
+        consumed — ``on_frame`` still applies it to the state.
         """
 
         def accepts(frame: bytes) -> bool:
-            try:
-                return matcher(frame.decode("ascii", errors="replace").strip()) is not None
-            except Exception:  # noqa: BLE001 - a raising matcher is a no-match
-                return False
+            decoded = frame.decode("ascii", errors="replace").strip()
+            return matcher(decoded) is not None
 
-        frame = await self.request(
-            command + TERMINATOR,
-            accepts,
-            timeout=self.request_timeout if timeout is None else timeout,
+        frame = await self.link.confirm(
+            nudge=command + TERMINATOR,
+            match=accepts,
+            timeout=self._timeout if timeout is None else timeout,
         )
         return matcher(frame.decode("ascii", errors="replace").strip())
 

@@ -18,7 +18,8 @@ src/anthem_rs232/
   protocol.py    -- Gen 2 parameter parsers/formatters, error reply parsing
   state.py       -- Gen 2 ReceiverState, MainZoneState, ZoneState, InputConfig
   players.py     -- Gen 2 MainPlayer (Z1) and ZonePlayer (Z2)
-  receiver.py    -- Gen 2 AnthemReceiver: connect/query/event loop/dispatcher
+  _runtime.py    -- ReceiverRuntime: owns the SerialLink, state, subscribers
+  receiver.py    -- Gen 2 AnthemReceiver: connect/query/event dispatcher
   models.py      -- Gen 2 MRX_310/510/710/520/720/1120/AVM_60 definitions
   __main__.py    -- Gen 2 CLI: python -m anthem_rs232 PORT [--probe]
   gen1/
@@ -46,7 +47,7 @@ tests/
 - Errors: `!E<orig>` (cannot execute), `!R<orig>` (out of range), `!I<orig>` (invalid command), `!Z<orig>` (zone off, system not in standby).
 - `connect()` opens the port, verifies with `Z1POW?` (3-attempt retry for flaky proxies), then sends `ECH1;` to enable auto-reports.
 - `query_state()` queries identification, inputs (`ICN?` + per-input `ISNyy?`/`ILNyy?`), and per-zone state.
-- Built on **serialkit** (`serial-toolkit` on PyPI, imported as `serialkit`): each receiver subclasses `serialkit.SerialDevice[…]`, so the read loop, framing, request/response correlation, the idle watchdog, and reconnect all live in the toolkit. The driver supplies the command surface, `on_connect` (identify/verify + enable auto-reports), and a sync `on_frame` event dispatcher (`_apply_event`) that mutates state and resolves/rejects pending queries. Framing is `DelimiterFramer(b";", strip=b"\x00")` (Gen 2) / `DelimiterFramer(b"\n", strip=b"\x00")` with an inline `;` split in `on_frame` (Gen 1); the NUL scrub handles the stray bytes receivers emit around ECO-standby transitions. Errors: Gen 2 echoes the command, so `on_frame` rejects the matching pendings via `pending.reject_matched(..., all=True)`; Gen 1 errors carry no correlating content, so it rejects the oldest via `pending.reject_oldest(...)`. The watchdog is `probe = ProbeSpec(frame=…, idle=60 s, attempts=3)` — `Z1POW?` (Gen 2) / `?` identify (Gen 1), both answered in standby; any RX (including an error reply) counts as alive, and the `attempts=3` retry covers ECO standby eating the first frame as MCU wake-up. Subscribers receive `copy_state` snapshots (a deep copy of the state); zone players read through the receiver's live state so a reconnect's fresh state object is always used.
+- Built on **serialkit** (`serial-toolkit` on PyPI, imported as `serialkit`): each receiver owns a `serialkit.SerialLink` (via the shared `ReceiverRuntime` base in `_runtime.py`), so the read loop, framing, pacing, the idle watchdog and reconnect all live in the toolkit. The driver supplies the command surface, `on_connect` (identify/verify + enable auto-reports), and a sync `on_frame` event dispatcher (`_apply_event`) that mutates state. Framing is `DelimiterFramer(b";", strip=b"\x00")` (Gen 2) / `DelimiterFramer(b"\n", strip=b"\x00")` with an inline `;` split in `on_frame` (Gen 1); the NUL scrub handles the stray bytes receivers emit around ECO-standby transitions. Queries use `link.confirm(...)`, which arms before the send and **observes without consuming** — the reply is both the caller's answer and an event that `on_frame` applies. An error reply fails the in-flight waiters via `link.report_error(...)`: Gen 2 echoes the failing command, Gen 1 emits a bare English phrase, and neither can be attributed to more than "whatever is waiting now". The watchdog is `IdleProbe(idle=60 s, probe=…, attempts=3)` — `Z1POW?` (Gen 2) / `?` identify (Gen 1), both answered in standby; any RX (including an error reply) counts as alive, and the retry covers ECO standby eating the first frame as MCU wake-up. Pacing is `Pacing(min_interval=30 ms)`, an engineering margin for a link with no flow control rather than a spec-quoted gap. Subscribers receive state snapshots, coalesced in `on_turn` so a burst of reports is one callback; zone players read through the receiver's live state.
 - Subscribers receive `ReceiverState` on changes, `None` on disconnect.
 
 ### Gen 1
@@ -54,10 +55,10 @@ tests/
 - Uses `serialx` at **9600 or 19200 baud** (per model — D2/D2v: 19200, others: 9600).
 - Framing: ASCII commands LF-terminated. Multiple commands chainable with `;`.
 - **Set commands return nothing on success** -- queries are the only reliable way to confirm state.
-- Errors are verbose ASCII: `Invalid Command`, `Parameter Out-of-range`, `Main Off`, `Zone2 Off`, `Unit Off`, `Already in use`. Raised as `Gen1CommandError` on the matching pending query.
+- Errors are verbose ASCII: `Invalid Command`, `Parameter Out-of-range`, `Main Off`, `Zone2 Off`, `Unit Off`, `Already in use`. Raised as `Gen1CommandError` on whatever query is in flight.
 - `connect()` opens the port, sends `?` to identify (parses `(model,version,build)`), then sends `SST1` to enable Tx Status auto-report frames.
 - `query_state()` issues `P1?`, `P2?`, `P3?`, `H?`, `TT?`.
-- Pending queries use a **matcher callable** instead of a prefix string — the receiver may answer multiple message shapes for the same query (e.g. tuner can respond `TFT...` or `TAT...`).
+- Queries use a **matcher callable** rather than a prefix string — the receiver may answer several message shapes for the same query (e.g. the tuner responds `TFT...` or `TAT...`). The matcher returns the decoded value, and `_query` re-runs it on the resolved frame to produce the caller's result.
 
 ## Key design decisions
 
@@ -83,7 +84,7 @@ tests/
 - `pytest` with `pytest-asyncio`, `asyncio_mode = "auto"`.
 - Gen 2: `MockSerialConnection` in `conftest.py` -- real `asyncio.StreamReader`, mock writer; `_on_write` auto-responds to `?`-suffixed queries from `_query_responses`.
 - Gen 1: `MockGen1Serial` in `test_gen1.py` -- same pattern, but matches against full command bytes (because Gen 1 has no universal "?" suffix), splits chained `;` commands before matching.
-- 173 tests total: 95 Gen 2, 78 Gen 1.
+- 172 tests total.
 - Run: `uv run pytest` or `python -m pytest tests/`
 
 ## Protocol references

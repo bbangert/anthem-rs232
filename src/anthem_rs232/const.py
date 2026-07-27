@@ -5,6 +5,10 @@ from enum import Enum
 # Anthem MRX x20 / AVM 60 serial defaults: 115200 8N1, semicolon terminator.
 BAUD_RATE = 115200
 COMMAND_TIMEOUT = 2.0  # seconds to wait for a response
+# Minimum gap between sends. The spec mandates none — it documents a 30-100 ms
+# command service rate (notes 8/9) and "Flow Control - None", so this is an
+# engineering margin against an undocumented buffer depth, not a quoted rule.
+INTER_COMMAND_DELAY = 0.03
 WATCHDOG_INTERVAL = 60.0  # seconds without RX before probing the link
 # ECO standby consumes the first frame as MCU wake-up (spec notes 10/11),
 # so probe several times before declaring the link dead.

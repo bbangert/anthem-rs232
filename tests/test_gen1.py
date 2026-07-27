@@ -625,18 +625,20 @@ async def test_gen1_link_loss_notifies_subscribers_none(gen1, mock_serial_gen1):
     assert states[-1] is None
 
 
-async def test_gen1_watchdog_probes_identify_when_idle(mock_serial_gen1):
+async def test_gen1_watchdog_probes_identify_when_idle(
+    mock_serial_gen1, monkeypatch
+):
     """serialkit's idle watchdog sends the identify probe (``?``); an answered
     probe (any RX counts as alive, incl. an error reply) keeps the link up.
 
     The probe mechanism (idle windows, unanswered -> reconnect) is covered by
     serialkit's own suite; this pins gen1's probe config and wiring.
     """
-    from serialkit import ProbeSpec
-
+    # Short idle so the watchdog fires quickly (the default is 60 s). The
+    # interval is read when the link is built, so patch before constructing.
+    monkeypatch.setattr(gen1_receiver_mod, "WATCHDOG_INTERVAL", 0.05)
     mock_serial_gen1.respond_to(b"?", b"(Statement D2,Version 3.10,Sep 1 2010)")
     recv = Gen1Receiver("/dev/ttyUSB0", model=STATEMENT_D2)
-    recv.probe = ProbeSpec(frame=b"?\n", idle=0.05, attempts=3)
 
     async def fake_open(*args, **kwargs):
         return mock_serial_gen1.reader, mock_serial_gen1.writer

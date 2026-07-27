@@ -3,30 +3,33 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 import serialx
 from serialkit import (
+    Backoff,
     CommandTimeoutError,
     DelimiterFramer,
-    ProbeSpec,
+    IdleProbe,
+    Pacing,
     ProtocolError,
-    SerialDevice,
-    match_prefix,
 )
 
+from ._runtime import ReceiverRuntime
 from .const import (
+    _RESPONSE_PREFIXES,
     BAUD_RATE,
     COMMAND_TIMEOUT,
-    WATCHDOG_INTERVAL,
-    WATCHDOG_PROBE_ATTEMPTS,
+    INTER_COMMAND_DELAY,
     LIP_SYNC_STEP_MS,
     MAX_DOLBY_VOLUME_LEVELER,
     MAX_INPUTS,
     MAX_LIP_SYNC_MS,
     MIN_DOLBY_VOLUME_LEVELER,
     MIN_LIP_SYNC_MS,
+    WATCHDOG_INTERVAL,
+    WATCHDOG_PROBE_ATTEMPTS,
     AudioInputChannels,
     AudioInputFormat,
     AudioListeningMode,
@@ -35,7 +38,6 @@ from .const import (
     TunerStatus,
     VideoInputResolution,
     Zone,
-    _RESPONSE_PREFIXES,
 )
 from .players import MainPlayer, ZonePlayer
 from .protocol import (
@@ -71,42 +73,60 @@ class CommandError(ProtocolError):
         self.original = original
 
 
-class AnthemReceiver(SerialDevice[ReceiverState]):
+class AnthemReceiver(ReceiverRuntime[ReceiverState]):
     """Async controller for an Anthem MRX 1120 / 720 / 520 / AVM 60 over RS232.
 
-    Built on serialkit: framing (``;`` terminator, NUL scrub), matcher-based
-    query correlation, the read loop, an idle-window watchdog, and reconnect
-    are provided by :class:`serialkit.SerialDevice`. This class is the command
-    surface plus the event dispatcher (:meth:`_apply_event`).
+    Owns a :class:`serialkit.SerialLink`, which provides framing (``;``
+    terminator, NUL scrub), the read loop, pacing, an idle-window watchdog and
+    reconnect. This class is the command surface plus the event dispatcher
+    (:meth:`_apply_event`).
     """
-
-    framer_factory = staticmethod(lambda: DelimiterFramer(b";", strip=b"\x00"))
-    request_timeout = COMMAND_TIMEOUT
-    # Z1POW? is answered even in ECO standby; any RX (including an error reply)
-    # counts as alive, matching the old watchdog's alive-on-error semantics.
-    # attempts=3 covers ECO standby eating the first frame as MCU wake-up.
-    probe = ProbeSpec(
-        frame=b"Z1POW?;",
-        idle=WATCHDOG_INTERVAL,
-        attempts=WATCHDOG_PROBE_ATTEMPTS,
-    )
 
     def __init__(
         self,
         port: str,
         model: ReceiverModel | None = None,
+        *,
+        baudrate: int = BAUD_RATE,
+        command_timeout: float | None = None,
+        backoff: Backoff | None = None,
+        connect: Callable[[], Awaitable[tuple[object, object]]] | None = None,
     ) -> None:
         self._port = port
         self._model = model
-        super().__init__(self._open_connection)
-        # A state object before start() so player/property reads work
-        # pre-connect; serialkit rebuilds it via make_state() per connection.
-        self.state = self.make_state()
+        self._baudrate = baudrate
+        self._command_timeout_override = command_timeout
+        super().__init__(
+            state=ReceiverState(),
+            connect=connect or self._open_connection,
+            framer=DelimiterFramer(b";", strip=b"\x00"),
+            # The doc documents a 30-100 ms service rate and no flow control;
+            # this is an engineering margin, not a spec-mandated gap.
+            pacing=Pacing(min_interval=INTER_COMMAND_DELAY),
+            # Z1POW? is answered even in ECO standby, and any RX (including an
+            # error reply) counts as alive. attempts covers ECO standby eating
+            # the first frame as MCU wake-up.
+            liveness=IdleProbe(
+                idle=WATCHDOG_INTERVAL,
+                probe=b"Z1POW?;",
+                attempts=WATCHDOG_PROBE_ATTEMPTS,
+            ),
+            backoff=backoff,
+        )
         self.main = MainPlayer(self)
         self.zone_2 = ZonePlayer(self, Zone.ZONE_2)
 
+    @property
+    def _timeout(self) -> float:
+        """Per-command deadline, re-read so tests can shrink the constant."""
+        if self._command_timeout_override is not None:
+            return self._command_timeout_override
+        return COMMAND_TIMEOUT
+
     async def _open_connection(self) -> tuple[object, object]:
-        return await serialx.open_serial_connection(self._port, baudrate=BAUD_RATE)
+        return await serialx.open_serial_connection(
+            self._port, baudrate=self._baudrate
+        )
 
     # -- Properties --
 
@@ -122,21 +142,9 @@ class AnthemReceiver(SerialDevice[ReceiverState]):
 
     # -- serialkit lifecycle callbacks --
 
-    def make_state(self) -> ReceiverState:
-        return ReceiverState()
-
-    def copy_state(self, state: ReceiverState) -> ReceiverState:
-        return state.copy()
-
     @property
     def _state(self) -> ReceiverState:
-        """The live receiver state.
-
-        Read-through so the event dispatcher and the zone players always see
-        the current connection's state object (serialkit rebuilds it on every
-        reconnect); mutating sub-objects in place still works.
-        """
-        assert self.state is not None
+        """The live receiver state, which the dispatcher and players mutate."""
         return self.state
 
     def _zone_state(self, zone: Zone) -> ZoneState:
@@ -165,19 +173,21 @@ class AnthemReceiver(SerialDevice[ReceiverState]):
             _LOGGER.debug("ECH1 rejected; continuing without auto-reports")
 
     def on_frame(self, frame: bytes) -> None:
-        """Route one framed message: apply state first, then resolve/reject."""
+        """Route one framed message: fail waiters on an error, else apply it.
+
+        A waiter for this frame resolves independently — ``expect`` observes
+        without consuming, so a query reply is both an answer and an event.
+        """
         message = frame.decode("ascii", errors="replace").strip()
         if not message:
             return
         error = parse_error_reply(message)
         if error is not None:
-            # Errors echo the original command (``!RZ1VOL+50``); reject every
-            # pending whose matcher accepts the echoed content (gen2 rejects
-            # the whole matching set, not just the oldest).
-            self.pending.reject_matched(
-                error.original.encode("ascii"),
-                CommandError(error.kind.value, error.original),
-                all=True,
+            # The receiver echoes the failing command (``!RZ1VOL+50``). Fail
+            # whatever is waiting now rather than letting it run out its
+            # timeout; the echo says the command will never be answered.
+            self.link.report_error(
+                CommandError(error.kind.value, error.original)
             )
             return
         prefix = self._match_prefix(message)
@@ -185,18 +195,17 @@ class AnthemReceiver(SerialDevice[ReceiverState]):
             param = message[len(prefix):]
             if self._apply_event(prefix, param):
                 self.notify()
-        self.pending.feed(frame)
 
-    # -- Connection lifecycle (aliases over serialkit start/stop) --
+    # -- Connection lifecycle --
 
     async def connect(self) -> None:
         """Open the serial connection, verify, and enable auto-reports."""
-        await self.start()
+        await self.link.start()
         _LOGGER.info("Connected to Anthem receiver on %s", self._port)
 
     async def disconnect(self) -> None:
         """Close the serial connection."""
-        await self.stop()
+        await self.link.stop()
         _LOGGER.info("Disconnected from Anthem receiver")
 
     # -- Identification --
@@ -423,7 +432,7 @@ class AnthemReceiver(SerialDevice[ReceiverState]):
 
     async def probe_inputs(self, count: int | None = None) -> dict[int, InputConfig]:
         """Discover configured inputs by querying ICN? + per-input names."""
-        if not self._connected:
+        if not self.connected:
             raise ConnectionError("Not connected")
 
         if count is None:
@@ -449,16 +458,20 @@ class AnthemReceiver(SerialDevice[ReceiverState]):
 
     async def _send_command(self, command: str, parameter: str) -> None:
         """Send a command (fire-and-forget; the echo returns as an event)."""
-        await self.send(f"{command}{parameter};".encode("ascii"))
+        await self.link.send(f"{command}{parameter};".encode("ascii"))
 
     async def _query(self, command: str) -> str:
         """Send a query (``COMMAND?;``) and return the response payload.
 
-        The response frame starts with the query prefix; the returned value is
-        the payload after it (matching the old pending-by-startswith behavior).
+        The reply is observed, not consumed: it still reaches ``on_frame``,
+        which is what applies it to the state. The returned payload is the
+        frame past the query prefix.
         """
-        frame = await self.request(
-            f"{command}?;".encode("ascii"), match_prefix(command.encode("ascii"))
+        wanted = command.encode("ascii")
+        frame = await self.link.confirm(
+            nudge=f"{command}?;".encode("ascii"),
+            match=lambda f: f.startswith(wanted),
+            timeout=self._timeout,
         )
         return frame.decode("ascii", errors="replace").strip()[len(command):]
 

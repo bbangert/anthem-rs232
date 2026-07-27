@@ -595,18 +595,17 @@ async def test_link_loss_notifies_subscribers_none(receiver, mock_serial):
     assert states[-1] is None
 
 
-async def test_watchdog_probes_z1pow_when_idle(mock_serial):
+async def test_watchdog_probes_z1pow_when_idle(mock_serial, monkeypatch):
     """serialkit's idle watchdog sends the Z1POW? probe; an answered probe
     (any RX counts as alive, including an error reply) keeps the link up.
 
     The probe mechanism (idle windows, unanswered -> reconnect) is covered by
     serialkit's own suite; this pins anthem's probe config and wiring.
     """
-    from serialkit import ProbeSpec
-
+    # Short idle so the watchdog fires quickly (the default is 60 s). The
+    # interval is read when the link is built, so patch before constructing.
+    monkeypatch.setattr(anthem_receiver, "WATCHDOG_INTERVAL", 0.05)
     recv = AnthemReceiver("/dev/ttyUSB0")
-    # Short idle so the watchdog fires quickly (the class default is 60 s).
-    recv.probe = ProbeSpec(frame=b"Z1POW?;", idle=0.05, attempts=3)
     mock_serial._query_responses = dict(DEFAULT_QUERY_RESPONSES)
 
     async def fake_open(*args, **kwargs):

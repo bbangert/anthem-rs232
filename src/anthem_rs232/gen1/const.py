@@ -13,6 +13,10 @@ from enum import Enum
 # the D2/D2v ship at ``19200``. Per-model overrides live on the ReceiverModel.
 DEFAULT_BAUD_RATE = 9600
 COMMAND_TIMEOUT = 2.0
+# Minimum gap between sends. The AVM-2 spec mandates none; this is an
+# engineering margin for a 9600-baud link with no flow control, where a frame
+# already occupies several milliseconds on the wire.
+INTER_COMMAND_DELAY = 0.03
 WATCHDOG_INTERVAL = 60.0  # seconds without RX before probing the link
 # Sleeping units can consume the first frame as wake-up; retry before
 # declaring the link dead.
