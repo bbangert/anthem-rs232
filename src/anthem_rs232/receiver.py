@@ -87,14 +87,14 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
         port: str,
         model: ReceiverModel | None = None,
         *,
-        baudrate: int = BAUD_RATE,
+        baud_rate: int = BAUD_RATE,
         command_timeout: float | None = None,
         backoff: Backoff | None = None,
         connect: Callable[[], Awaitable[tuple[object, object]]] | None = None,
     ) -> None:
         self._port = port
         self._model = model
-        self._baudrate = baudrate
+        self._baud_rate = baud_rate
         self._command_timeout_override = command_timeout
         super().__init__(
             state=ReceiverState(),
@@ -125,7 +125,7 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
 
     async def _open_connection(self) -> tuple[object, object]:
         return await serialx.open_serial_connection(
-            self._port, baudrate=self._baudrate
+            self._port, baudrate=self._baud_rate
         )
 
     # -- Properties --
