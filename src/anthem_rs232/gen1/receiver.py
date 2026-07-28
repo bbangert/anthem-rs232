@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 import serialx
 from serialkit import (
@@ -74,7 +74,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-StateCallback: TypeAlias = Callable[[Gen1ReceiverState | None], None]
+type StateCallback = Callable[[Gen1ReceiverState | None], None]
 
 
 class Gen1CommandError(ProtocolError):

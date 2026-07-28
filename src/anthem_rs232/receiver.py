@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-StateCallback = Callable[[ReceiverState | None], None]
+type StateCallback = Callable[[ReceiverState | None], None]
 
 #: Response prefixes sorted longest-first so that ``Z1IRH`` matches before ``Z1IR``.
 _PREFIXES_BY_LEN = tuple(
