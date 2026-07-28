@@ -105,7 +105,7 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
         baud_rate: int | None = None,
         command_timeout: float | None = None,
         backoff: Backoff | None = None,
-        connect: Callable[[], Awaitable[tuple[object, object]]] | None = None,
+        connect_factory: Callable[[], Awaitable[tuple[object, object]]] | None = None,
     ) -> None:
         self._port = port
         self._model = model
@@ -118,7 +118,7 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
             self._baud_rate = 9600
         super().__init__(
             state=Gen1ReceiverState(),
-            connect=connect or self._open_connection,
+            connect_factory=connect_factory or self._open_connection,
             framer=DelimiterFramer(TERMINATOR, strip=b"\x00"),
             pacing=Pacing(min_interval=INTER_COMMAND_DELAY),
             # The ``?`` identify query is answered in any power state, and any

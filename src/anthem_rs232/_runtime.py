@@ -43,7 +43,7 @@ class ReceiverRuntime[S: _CopyableState]:
         self,
         *,
         state: S,
-        connect: Callable[[], Awaitable[tuple[Any, Any]]],
+        connect_factory: Callable[[], Awaitable[tuple[Any, Any]]],
         framer: Framer,
         pacing: Pacing | None = None,
         liveness: IdleProbe | None = None,
@@ -51,7 +51,7 @@ class ReceiverRuntime[S: _CopyableState]:
     ) -> None:
         self.state: S = state
         self.link = SerialLink(
-            connect=connect,
+            connect=connect_factory,
             framer=framer,
             handler=self,
             pacing=pacing,
