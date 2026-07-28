@@ -304,10 +304,13 @@ async def test_connect_failure_raises_connection_error(mock_serial_gen1):
     async def fake_open(*args, **kwargs):
         return mock_serial_gen1.reader, mock_serial_gen1.writer
 
-    with patch(
-        "anthem_rs232.gen1.receiver.serialx.open_serial_connection",
-        side_effect=fake_open,
-    ), pytest.raises(ConnectionError):
+    with (
+        patch(
+            "anthem_rs232.gen1.receiver.serialx.open_serial_connection",
+            side_effect=fake_open,
+        ),
+        pytest.raises(ConnectionError),
+    ):
         await recv.connect()
 
 
@@ -625,9 +628,7 @@ async def test_gen1_link_loss_notifies_subscribers_none(gen1, mock_serial_gen1):
     assert states[-1] is None
 
 
-async def test_gen1_watchdog_probes_identify_when_idle(
-    mock_serial_gen1, monkeypatch
-):
+async def test_gen1_watchdog_probes_identify_when_idle(mock_serial_gen1, monkeypatch):
     """serialkit's idle watchdog sends the identify probe (``?``); an answered
     probe (any RX counts as alive, incl. an error reply) keeps the link up.
 

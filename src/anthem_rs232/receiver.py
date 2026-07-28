@@ -28,6 +28,8 @@ from .const import (
     MAX_LIP_SYNC_MS,
     MIN_DOLBY_VOLUME_LEVELER,
     MIN_LIP_SYNC_MS,
+    SWEEP_QUIET,
+    SWEEP_TIMEOUT,
     WATCHDOG_INTERVAL,
     WATCHDOG_PROBE_ATTEMPTS,
     AudioInputChannels,
@@ -59,9 +61,35 @@ _LOGGER = logging.getLogger(__name__)
 type StateCallback = Callable[[ReceiverState | None], None]
 
 #: Response prefixes sorted longest-first so that ``Z1IRH`` matches before ``Z1IR``.
-_PREFIXES_BY_LEN = tuple(
-    sorted(_RESPONSE_PREFIXES, key=lambda p: (-len(p), p))
+_PREFIXES_BY_LEN = tuple(sorted(_RESPONSE_PREFIXES, key=lambda p: (-len(p), p)))
+
+_IDENTIFICATION_QUERIES = ("IDM", "IDS", "IDR", "IDB", "IDH", "IDN")
+_SETUP_QUERIES = ("ECH", "FPB", "SIP")
+_MAIN_ZONE_QUERIES = (
+    "Z1POW",
+    "Z1INP",
+    "Z1VOL",
+    "Z1MUT",
+    "Z1ARC",
+    "Z1BAL",
+    "Z1ALM",
+    "Z1DYN",
+    "Z1DIA",
+    "Z1AIC",
+    "Z1AIF",
+    "Z1AIN",
+    "Z1AIR",
+    "Z1BRT",
+    "Z1SRT",
+    "Z1VIR",
+    "Z1IRH",
+    "Z1IRV",
+    "Z1TBS",
+    "T1FMS",
+    "T1PSA",
 )
+_ZONE_2_QUERIES = ("Z2POW", "Z2INP", "Z2VOL", "Z2MUT", "Z2TBS")
+_SELECTED_INPUT_QUERIES = ("SLIP00", "SDVS00", "SDVL00")
 
 
 class CommandError(ProtocolError):
@@ -162,7 +190,7 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
             try:
                 await self._query("Z1POW")
                 break
-            except (CommandTimeoutError, CommandError):
+            except CommandTimeoutError, CommandError:
                 if attempt == 2:
                     raise ConnectionError(
                         f"No response from receiver on {self._port}"
@@ -186,13 +214,11 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
             # The receiver echoes the failing command (``!RZ1VOL+50``). Fail
             # whatever is waiting now rather than letting it run out its
             # timeout; the echo says the command will never be answered.
-            self.link.report_error(
-                CommandError(error.kind.value, error.original)
-            )
+            self.link.report_error(CommandError(error.kind.value, error.original))
             return
         prefix = self._match_prefix(message)
         if prefix is not None:
-            param = message[len(prefix):]
+            param = message[len(prefix) :]
             if self._apply_event(prefix, param):
                 self.notify()
 
@@ -291,9 +317,7 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
     async def set_dolby_volume(self, enabled: bool, input_index: int = 0) -> None:
         """Turn Dolby Volume off/on for an input."""
         _validate_input_index(input_index)
-        await self._send_command(
-            "SDVS", f"{input_index:02d}{'1' if enabled else '0'}"
-        )
+        await self._send_command("SDVS", f"{input_index:02d}{'1' if enabled else '0'}")
 
     async def query_dolby_volume(self, input_index: int = 0) -> bool:
         """Query whether Dolby Volume is on for an input."""
@@ -318,9 +342,7 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
         """Set trigger 1 or 2 to menu (False) or RS-232/IP (True) control."""
         if trigger not in (1, 2):
             raise ValueError(f"Trigger must be 1 or 2: {trigger}")
-        await self._send_command(
-            f"R{trigger - 1}CTL", "1" if rs232_controlled else "0"
-        )
+        await self._send_command(f"R{trigger - 1}CTL", "1" if rs232_controlled else "0")
 
     async def set_trigger(self, trigger: int, on: bool) -> None:
         """Set trigger 1 or 2 on/off (only valid when under RS-232/IP control)."""
@@ -330,103 +352,74 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
 
     # -- State population --
 
-    async def query_state(self) -> None:
-        """Query identification, inputs, and per-zone state from the receiver."""
-        await self._populate_identification()
-        await self._populate_inputs()
-        await self._populate_main_zone()
-        await self._populate_zone_2()
-
     @property
     def _unsupported(self) -> frozenset[str]:
+        """Queries this model is known not to answer."""
         if self._model is None:
             return frozenset()
         return self._model.unsupported_startup_queries
 
-    async def _populate_identification(self) -> None:
-        unsupported = self._unsupported
-        for prefix in ("IDM", "IDS", "IDR", "IDB", "IDH", "IDN"):
-            if prefix in unsupported:
-                continue
-            try:
-                await self._query(prefix)
-            except (TimeoutError, CommandError):
-                pass
-        for prefix in ("ECH", "FPB", "SIP"):
-            if prefix in unsupported:
-                continue
-            try:
-                await self._query(prefix)
-            except (TimeoutError, CommandError):
-                pass
+    async def query_state(self) -> None:
+        """Query identification, inputs, per-zone state and per-input settings.
 
-    async def _populate_inputs(self) -> None:
-        try:
-            count_str = await self._query("ICN")
-        except (TimeoutError, CommandError):
+        Sent as a sweep: every frame goes out under pacing, then the receiver
+        is given until it falls quiet to answer. A query a model does not
+        implement simply never produces an event, rather than costing a
+        full command timeout each — which is the difference between a round
+        that finishes in about a second and one that can take a minute.
+
+        The trade is that an unanswered query is no longer distinguishable
+        from an unsupported one, so ``ReceiverModel.unsupported_startup_queries``
+        is the only filter left. That is more honest than paying a timeout to
+        rediscover the same fact on every connect.
+        """
+        frames = self._startup_frames()
+        if frames:
+            await self.link.sweep(frames, quiet=SWEEP_QUIET, timeout=SWEEP_TIMEOUT)
+        await self._query_input_names()
+
+    def _startup_frames(self) -> list[bytes]:
+        """The query frames for a full refresh, minus anything the model
+        declares unsupported."""
+        unsupported = self._unsupported
+        prefixes = (
+            *_IDENTIFICATION_QUERIES,
+            *_SETUP_QUERIES,
+            *_MAIN_ZONE_QUERIES,
+            *_ZONE_2_QUERIES,
+            # Per-input processing for input 00 (the selected input). These
+            # used to be the consumer's job to ask for separately.
+            *_SELECTED_INPUT_QUERIES,
+        )
+        return [
+            f"{prefix}?;".encode("ascii")
+            for prefix in prefixes
+            if prefix not in unsupported
+        ]
+
+    async def _query_input_names(self) -> None:
+        """Enumerate the configured inputs.
+
+        This one cannot be part of the sweep: the number of inputs comes from
+        ICN, so it has to be answered before the per-input frames can be built.
+        """
+        if "ICN" in self._unsupported:
             return
         try:
-            count = int(count_str)
-        except ValueError:
+            count = int(await self._query("ICN"))
+        except TimeoutError, CommandTimeoutError, CommandError, ValueError:
             return
-        count = min(count, MAX_INPUTS)
-        for idx in range(1, count + 1):
-            try:
-                await self._query(f"ISN{idx:02d}")
-            except (TimeoutError, CommandError):
-                pass
-            try:
-                await self._query(f"ILN{idx:02d}")
-            except (TimeoutError, CommandError):
-                pass
+        frames = self._input_name_frames(count)
+        if frames:
+            await self.link.sweep(frames, quiet=SWEEP_QUIET, timeout=SWEEP_TIMEOUT)
 
-    async def _populate_main_zone(self) -> None:
-        unsupported = self._unsupported
-        for prefix in (
-            "Z1POW",
-            "Z1INP",
-            "Z1VOL",
-            "Z1MUT",
-            "Z1ARC",
-            "Z1BAL",
-            "Z1ALM",
-            "Z1DYN",
-            "Z1DIA",
-            "Z1AIC",
-            "Z1AIF",
-            "Z1AIN",
-            "Z1AIR",
-            "Z1BRT",
-            "Z1SRT",
-            "Z1VIR",
-            "Z1IRH",
-            "Z1IRV",
-            "Z1TBS",
-            "T1FMS",
-            "T1PSA",
-        ):
-            if prefix in unsupported:
-                continue
-            try:
-                await self._query(prefix)
-            except (TimeoutError, CommandError):
-                pass
-
-    async def _populate_zone_2(self) -> None:
-        unsupported = self._unsupported
-        for prefix in (
-            "Z2POW",
-            "Z2INP",
-            "Z2VOL",
-            "Z2MUT",
-            "Z2TBS",
-        ):
-            if prefix in unsupported:
-                continue
-            try:
-                await self._query(prefix)
-            except (TimeoutError, CommandError):
-                pass
+    @staticmethod
+    def _input_name_frames(count: int) -> list[bytes]:
+        return [
+            f"{prefix}{idx:02d}?;".encode("ascii")
+            for idx in range(1, min(count, MAX_INPUTS) + 1)
+            for prefix in ("ISN", "ILN")
+        ]
 
     # -- Source probing --
 
@@ -446,11 +439,11 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
         for idx in range(1, count + 1):
             try:
                 await self._query(f"ISN{idx:02d}")
-            except (TimeoutError, CommandError):
+            except TimeoutError, CommandError:
                 pass
             try:
                 await self._query(f"ILN{idx:02d}")
-            except (TimeoutError, CommandError):
+            except TimeoutError, CommandError:
                 pass
         return dict(self._state.inputs)
 
@@ -473,7 +466,7 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
             match=lambda f: f.startswith(wanted),
             timeout=self._timeout,
         )
-        return frame.decode("ascii", errors="replace").strip()[len(command):]
+        return frame.decode("ascii", errors="replace").strip()[len(command) :]
 
     # -- Message processing --
 
@@ -660,7 +653,9 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
         # Tuner
         if prefix == "T1FMS":
             try:
-                return self._set_main_value("tuner_frequency", parse_fm_frequency(param))
+                return self._set_main_value(
+                    "tuner_frequency", parse_fm_frequency(param)
+                )
             except ValueError:
                 return False
         if prefix == "T1PSA":
@@ -750,12 +745,13 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
             changed = True
         # Update aggregate chassis power: True if any zone is on, False if none.
         zones_on = [self._state.main_zone.power, self._state.zone_2.power]
+        chassis: bool | None
         if any(z is True for z in zones_on):
             chassis = True
         elif all(z is False for z in zones_on if z is not None):
             chassis = False
         else:
-            chassis = self._state.power
+            chassis = self._state.power  # still unknown
         if self._set_attr_value(self._state, "power", chassis):
             changed = True
         return changed

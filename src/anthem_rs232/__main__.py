@@ -15,8 +15,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from enum import Enum
 
-from . import AnthemReceiver, ReceiverState
+from . import AnthemPlayer, AnthemReceiver, ReceiverState
 
 
 def _format_db(db: float | None) -> str:
@@ -30,7 +31,7 @@ def _format_db(db: float | None) -> str:
 def _format_enum(val: object | None) -> str:
     if val is None:
         return "?"
-    if hasattr(val, "name"):
+    if isinstance(val, Enum):
         return val.name
     return str(val)
 
@@ -77,12 +78,16 @@ def _print_state(state: ReceiverState) -> None:
     print(f"    ARC:           {mz.arc_enabled}")
     print(f"    Balance:       {mz.balance if mz.balance is not None else '?'}")
     print(f"    Listening:     {_format_enum(mz.audio_listening_mode)}")
-    print(f"    Audio in:      {mz.audio_input_name or '?'} ({_format_enum(mz.audio_input_format)})")
+    print(
+        f"    Audio in:      {mz.audio_input_name or '?'} ({_format_enum(mz.audio_input_format)})"
+    )
     print(f"    Audio chans:   {_format_enum(mz.audio_input_channels)}")
     print(f"    Video res:     {_format_enum(mz.video_input_resolution)}")
     print(f"    Bass / Treble: {_format_db(mz.bass)} / {_format_db(mz.treble)}")
     if mz.tuner_frequency is not None:
-        print(f"    FM:            {mz.tuner_frequency:0.2f} MHz (preset {mz.tuner_preset or '-'})")
+        print(
+            f"    FM:            {mz.tuner_frequency:0.2f} MHz (preset {mz.tuner_preset or '-'})"
+        )
     if mz.channel_levels:
         print()
         print("    Channel levels:")
@@ -107,7 +112,7 @@ def _print_state(state: ReceiverState) -> None:
     print()
 
 
-def _player_for(receiver: AnthemReceiver, zone: str):
+def _player_for(receiver: AnthemReceiver, zone: str) -> AnthemPlayer:
     """Return the player matching ``--zone main|2``."""
     if zone == "main":
         return receiver.main
@@ -178,15 +183,21 @@ async def _run(args: argparse.Namespace) -> None:
 
         if args.input is not None:
             print(f"Selecting input: {args.input}")
-            await _player_for(receiver, args.zone if args.zone != "all" else "main").select_input(args.input)
+            await _player_for(
+                receiver, args.zone if args.zone != "all" else "main"
+            ).select_input(args.input)
 
         if args.volume is not None:
             print(f"Setting volume: {args.volume:+.0f} dB")
-            await _player_for(receiver, args.zone if args.zone != "all" else "main").set_volume(args.volume)
+            await _player_for(
+                receiver, args.zone if args.zone != "all" else "main"
+            ).set_volume(args.volume)
 
         if args.mute is not None:
             print(f"Setting mute: {args.mute}")
-            await _do_mute(receiver, args.mute, args.zone if args.zone != "all" else "main")
+            await _do_mute(
+                receiver, args.mute, args.zone if args.zone != "all" else "main"
+            )
 
         # Allow a moment for auto-report frames to land before we query state.
         if any(v is not None for v in (args.power, args.input, args.volume, args.mute)):

@@ -8,6 +8,7 @@ import pytest
 
 import anthem_rs232
 import anthem_rs232.gen1.receiver as gen1_receiver
+import anthem_rs232.players as anthem_players
 import anthem_rs232.receiver as anthem_receiver
 from anthem_rs232 import AnthemReceiver
 from anthem_rs232.models import ReceiverModel
@@ -19,6 +20,9 @@ from anthem_rs232.models import ReceiverModel
 anthem_rs232.COMMAND_TIMEOUT = 0.1
 anthem_receiver.COMMAND_TIMEOUT = 0.1
 anthem_receiver.INTER_COMMAND_DELAY = 0.0
+anthem_players.POWER_ON_CONFIRM_TIMEOUT = 0.1
+anthem_receiver.SWEEP_QUIET = 0.01
+anthem_receiver.SWEEP_TIMEOUT = 1.0
 gen1_receiver.INTER_COMMAND_DELAY = 0.0
 gen1_receiver.COMMAND_TIMEOUT = 0.1
 
@@ -87,10 +91,18 @@ class MockSerialConnection:
         self.written_data: list[bytes] = []
         self._query_responses: dict[str, list[str]] = {}
         self._command_handler: Callable[[str], None] | None = None
+        # Real receivers echo a successful set command; tests can opt out.
+        self.echo_commands = True
         self.writer.write.side_effect = self._on_write
 
     def _on_write(self, data: bytes) -> None:
-        """Track written data and auto-respond to queries."""
+        """Track written data and auto-respond.
+
+        Queries answer from ``_query_responses``. Everything else is a set
+        command, and a real receiver echoes those back on success — which is
+        what lets a caller confirm one actually landed. Tests that need a
+        different reply install a ``_command_handler``.
+        """
         self.written_data.append(data)
         cmd = data.decode("ascii").rstrip(";")
         if cmd.endswith("?"):
@@ -99,6 +111,8 @@ class MockSerialConnection:
                 self.inject_response(resp)
         elif self._command_handler is not None:
             self._command_handler(cmd)
+        elif self.echo_commands:
+            self.inject_response(cmd)
 
     def inject_response(self, message: str) -> None:
         """Simulate the receiver sending a message (without the ``;``)."""

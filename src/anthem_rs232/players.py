@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .const import (
+    POWER_ON_CONFIRM_TIMEOUT,
+    TERMINATOR,
     AudioListeningMode,
     Channel,
     DolbyDynamicRange,
@@ -62,8 +64,24 @@ class _BasePlayer:
         return self._state.mute
 
     async def power_on(self) -> None:
-        """Turn this zone on."""
-        await self._receiver._send_command(f"{self._zone_prefix}POW", "1")
+        """Turn this zone on, waiting for the receiver to confirm it.
+
+        A receiver in ECO standby consumes the first frame waking its MCU, and
+        does so silently — the command is fire-and-forget on the wire, so a
+        swallowed power-on is indistinguishable from a delivered one. The spec
+        prescribes send / wait for the response / send again, which is
+        ``retries=1``; the confirming frame is the zone's own power report.
+
+        Raises :class:`~serialkit.CommandTimeoutError` if the receiver never
+        reports the zone on.
+        """
+        report = f"{self._zone_prefix}POW1".encode("ascii")
+        await self._receiver.link.confirm(
+            nudge=report + TERMINATOR,
+            match=lambda frame: frame == report,
+            timeout=POWER_ON_CONFIRM_TIMEOUT,
+            retries=1,
+        )
 
     async def power_off(self) -> None:
         """Turn this zone off."""
@@ -171,25 +189,19 @@ class MainPlayer(_BasePlayer):
 
     async def set_channel_level(self, channel: Channel, db: float) -> None:
         """Set a per-channel level in dB. Subs/fronts/etc. -10..+10; LFE -10..0."""
-        await self._receiver._send_command(
-            "Z1LEV", level_to_param(channel.value, db)
-        )
+        await self._receiver._send_command("Z1LEV", level_to_param(channel.value, db))
 
     async def channel_level_up(self, channel: Channel, step: int = 1) -> None:
         """Increase a channel's level by ``step`` dB (0-10)."""
         if not 0 <= step <= 10:
             raise ValueError(f"Level step out of range: {step}")
-        await self._receiver._send_command(
-            "Z1LUP", f"{channel.value}{step:02d}"
-        )
+        await self._receiver._send_command("Z1LUP", f"{channel.value}{step:02d}")
 
     async def channel_level_down(self, channel: Channel, step: int = 1) -> None:
         """Decrease a channel's level by ``step`` dB (0-10)."""
         if not 0 <= step <= 10:
             raise ValueError(f"Level step out of range: {step}")
-        await self._receiver._send_command(
-            "Z1LDN", f"{channel.value}{step:02d}"
-        )
+        await self._receiver._send_command("Z1LDN", f"{channel.value}{step:02d}")
 
     async def query_channel_level(self, channel: Channel) -> float:
         """Query a single channel's level."""

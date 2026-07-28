@@ -46,7 +46,7 @@ tests/
 - Successful set commands echo back. Queries return `<COMMAND><PAYLOAD>;`.
 - Errors: `!E<orig>` (cannot execute), `!R<orig>` (out of range), `!I<orig>` (invalid command), `!Z<orig>` (zone off, system not in standby).
 - `connect()` opens the port, verifies with `Z1POW?` (3-attempt retry for flaky proxies), then sends `ECH1;` to enable auto-reports.
-- `query_state()` queries identification, inputs (`ICN?` + per-input `ISNyy?`/`ILNyy?`), and per-zone state.
+- `query_state()` sweeps identification, setup, both zones, and the selected input's processing settings, then enumerates inputs (`ICN?` first, since the count decides how many `ISNyy?`/`ILNyy?` follow). A sweep sends everything under pacing and ends when the receiver falls quiet, so a query a model ignores costs nothing instead of a full command timeout. The trade is that unanswered and unsupported become indistinguishable, leaving `ReceiverModel.unsupported_startup_queries` as the only filter.
 - Built on **serialkit** (`serial-toolkit` on PyPI, imported as `serialkit`): each receiver owns a `serialkit.SerialLink` (via the shared `ReceiverRuntime` base in `_runtime.py`), so the read loop, framing, pacing, the idle watchdog and reconnect all live in the toolkit. The driver supplies the command surface, `on_connect` (identify/verify + enable auto-reports), and a sync `on_frame` event dispatcher (`_apply_event`) that mutates state. Framing is `DelimiterFramer(b";", strip=b"\x00")` (Gen 2) / `DelimiterFramer(b"\n", strip=b"\x00")` with an inline `;` split in `on_frame` (Gen 1); the NUL scrub handles the stray bytes receivers emit around ECO-standby transitions. Queries use `link.confirm(...)`, which arms before the send and **observes without consuming** — the reply is both the caller's answer and an event that `on_frame` applies. An error reply fails the in-flight waiters via `link.report_error(...)`: Gen 2 echoes the failing command, Gen 1 emits a bare English phrase, and neither can be attributed to more than "whatever is waiting now". The watchdog is `IdleProbe(idle=60 s, probe=…, attempts=3)` — `Z1POW?` (Gen 2) / `?` identify (Gen 1), both answered in standby; any RX (including an error reply) counts as alive, and the retry covers ECO standby eating the first frame as MCU wake-up. Pacing is `Pacing(min_interval=30 ms)`, an engineering margin for a link with no flow control rather than a spec-quoted gap. Subscribers receive state snapshots, coalesced in `on_turn` so a burst of reports is one callback; zone players read through the receiver's live state.
 - Subscribers receive `ReceiverState` on changes, `None` on disconnect.
 
@@ -69,6 +69,7 @@ tests/
 - Prefix matching is longest-first (`_PREFIXES_BY_LEN`).
 - `Z0POW` events update both zones + a synthesized aggregate `state.power` ("any zone on" → True; "all zones off" → False).
 - Volume is integer dB only (per spec: "Entry is rounded to nearest valid value"). Format is `±NN` (e.g. `Z1VOL-35`, `Z1VOL+05`).
+- `ZonePlayer.power_on()` confirms. A receiver in ECO standby consumes the first frame waking its MCU and says nothing, so the spec prescribes send / wait for the response / send again — `confirm(retries=1)`, with the zone's own power report as the evidence. It raises if the zone never reports on, which is the only way a caller can learn the command did not land.
 - Per-input settings (`SLIP` lip sync, `SDVS`/`SDVL` Dolby Volume) live on `InputConfig`; an event/report for input `00` is applied to the currently selected input. Pending queries are matched by `startswith`, so indexed query prefixes (`SPN1`, `SLIP02`, `Z1LEV3`) resolve even though the response-prefix table only holds the base command.
 
 ### Gen 1
@@ -84,18 +85,10 @@ tests/
 - `pytest` with `pytest-asyncio`, `asyncio_mode = "auto"`.
 - Gen 2: `MockSerialConnection` in `conftest.py` -- real `asyncio.StreamReader`, mock writer; `_on_write` auto-responds to `?`-suffixed queries from `_query_responses`.
 - Gen 1: `MockGen1Serial` in `test_gen1.py` -- same pattern, but matches against full command bytes (because Gen 1 has no universal "?" suffix), splits chained `;` commands before matching.
-- 172 tests total.
+- 176 tests total.
 - Run: `uv run pytest` or `python -m pytest tests/`
 
 ## Protocol references
 
 - Gen 2: [Anthem MRX 1120 / 720 / 520 / AVM 60 IP / RS-232 serial commands](https://docs.google.com/spreadsheets/d/1_lN8JWSIPRrWrqxuZ3lNGy5GQ3FjyaBi6kIeuk21GP4/edit?usp=sharing) (Feb 2 2016).
 - Gen 1: AVM-2 serial spec (21 Nov 2000) bundled in `rsnodgrass/python-anthemav-serial/docs/AVM-2-serial-programming.txt`. YAML command tables: `anthemav_serial/protocols/anthem_rs232_gen1.yaml`.
-
-## AI policy
-
-This project follows the [Open Home Foundation AI Policy](AI_POLICY.md).
-Autonomous contributions are not accepted: a human must review, understand,
-and be able to explain every change before it is submitted. Do not open
-issues or pull requests autonomously, and do not post comments on behalf of
-a user without their review.

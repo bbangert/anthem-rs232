@@ -25,11 +25,13 @@ The two generations use different wire formats and have separate receiver classe
 # Gen 2 (semicolon-terminated, 115200 baud)
 from anthem_rs232 import AnthemReceiver
 from anthem_rs232.models import MRX_1120
+
 gen2 = AnthemReceiver("/dev/ttyUSB0", model=MRX_1120)
 
 # Gen 1 (LF-terminated, 9600 / 19200 baud per model)
 from anthem_rs232 import Gen1Receiver
 from anthem_rs232.gen1 import STATEMENT_D2
+
 gen1 = Gen1Receiver("/dev/ttyUSB0", model=STATEMENT_D2)
 ```
 
@@ -53,6 +55,7 @@ Requires Python 3.12+.
 import asyncio
 from anthem_rs232 import AnthemReceiver, AudioListeningMode
 
+
 async def main():
     receiver = AnthemReceiver("/dev/ttyUSB0")
     await receiver.connect()
@@ -68,6 +71,7 @@ async def main():
     await receiver.main.set_audio_listening_mode(AudioListeningMode.DOLBY_SURROUND)
 
     await receiver.disconnect()
+
 
 asyncio.run(main())
 ```
@@ -119,22 +123,22 @@ await receiver.connect()
 await receiver.query_state()
 
 state = receiver.state
-state.model                  # "MRX 1120"
-state.software_version       # "0.2.3"
-state.power                  # True if any zone is on
-state.front_panel_brightness # FrontPanelBrightness.MEDIUM
-state.inputs                 # {1: InputConfig(...), ...}
+state.model  # "MRX 1120"
+state.software_version  # "0.2.3"
+state.power  # True if any zone is on
+state.front_panel_brightness  # FrontPanelBrightness.MEDIUM
+state.inputs  # {1: InputConfig(...), ...}
 
 mz = state.main_zone
-mz.power                # True / False
-mz.input_index          # 1
-mz.volume               # -35.0
-mz.mute                 # True / False
-mz.arc_enabled          # True / False
-mz.balance              # 0-100, 50 = center
-mz.audio_listening_mode # AudioListeningMode enum
-mz.audio_input_format   # AudioInputFormat enum
-mz.video_input_resolution # VideoInputResolution enum
+mz.power  # True / False
+mz.input_index  # 1
+mz.volume  # -35.0
+mz.mute  # True / False
+mz.arc_enabled  # True / False
+mz.balance  # 0-100, 50 = center
+mz.audio_listening_mode  # AudioListeningMode enum
+mz.audio_input_format  # AudioInputFormat enum
+mz.video_input_resolution  # VideoInputResolution enum
 ```
 
 ### Event subscription
@@ -148,6 +152,7 @@ def on_change(state):
         return
     print(f"Volume: {state.main_zone.volume} dB")
 
+
 unsub = receiver.subscribe(on_change)
 unsub()  # stop receiving
 ```
@@ -155,9 +160,9 @@ unsub()  # stop receiving
 ### Power
 
 ```python
-await receiver.power_on_all()    # Z0POW1 -- power all zones on
-await receiver.power_off_all()   # Z0POW0 -- system standby
-await receiver.main.power_on()   # Z1POW1
+await receiver.power_on_all()  # Z0POW1 -- power all zones on
+await receiver.power_off_all()  # Z0POW0 -- system standby
+await receiver.main.power_on()  # Z1POW1
 await receiver.main.power_off()  # Z1POW0
 on = await receiver.main.query_power()
 ```
@@ -168,8 +173,8 @@ Volume is in dB and rounded to the nearest valid value by the receiver.
 
 ```python
 await receiver.main.set_volume(-30.0)  # Z1VOL-30
-await receiver.main.set_volume(5.0)    # Z1VOL+05
-await receiver.main.volume_up()        # Z1VUP01 (1 dB step)
+await receiver.main.set_volume(5.0)  # Z1VOL+05
+await receiver.main.volume_up()  # Z1VUP01 (1 dB step)
 await receiver.main.volume_up(step=5)  # Z1VUP05
 await receiver.main.volume_down(step=2)
 db = await receiver.main.query_volume()
@@ -192,8 +197,8 @@ await receiver.main.select_input(2)
 idx = await receiver.main.query_input()
 
 inputs = receiver.state.inputs
-print(inputs[1].short_name)   # "CBL"
-print(inputs[1].long_name)    # "Cable Box"
+print(inputs[1].short_name)  # "CBL"
+print(inputs[1].long_name)  # "Cable Box"
 ```
 
 ### Audio listening mode
@@ -221,9 +226,9 @@ input on the receiver. ``input_index=0`` (the default) targets the currently
 selected input.
 
 ```python
-await receiver.set_lip_sync(50)                        # SLIP00050 (0-150 ms, 5 ms steps)
-await receiver.set_dolby_volume(True, input_index=2)   # SDVS021
-await receiver.set_dolby_volume_leveler(5)             # SDVL005 (0 = off, 1-9)
+await receiver.set_lip_sync(50)  # SLIP00050 (0-150 ms, 5 ms steps)
+await receiver.set_dolby_volume(True, input_index=2)  # SDVS021
+await receiver.set_dolby_volume_leveler(5)  # SDVL005 (0 = off, 1-9)
 
 ms = await receiver.query_lip_sync()
 on = await receiver.query_dolby_volume()
@@ -242,7 +247,7 @@ These are runtime adjustments meant to compensate for source material — for sy
 ```python
 from anthem_rs232 import Channel
 
-await receiver.main.set_balance(50)    # 0=full left, 100=full right
+await receiver.main.set_balance(50)  # 0=full left, 100=full right
 await receiver.main.set_channel_level(Channel.SUBS, -3.0)
 await receiver.main.set_channel_level(Channel.HEIGHTS_1, 2.0)
 await receiver.main.channel_level_up(Channel.CENTER)
@@ -254,7 +259,7 @@ await receiver.main.set_treble(3.0)
 ### Tuner (FM)
 
 ```python
-await receiver.main.set_fm_frequency(105.50)   # T1FMS105.50
+await receiver.main.set_fm_frequency(105.50)  # T1FMS105.50
 await receiver.main.tune_up()
 await receiver.main.seek_up()
 await receiver.main.preset_up()
@@ -279,7 +284,7 @@ await receiver.zone_2.mute_on()
 from anthem_rs232 import FrontPanelBrightness
 
 await receiver.set_front_panel_brightness(FrontPanelBrightness.HIGH)
-await receiver.set_standby_ip_control(True)   # required for IP power-on
+await receiver.set_standby_ip_control(True)  # required for IP power-on
 await receiver.set_speaker_profile(2)
 await receiver.main.display_message(0, "Hello")
 await receiver.main.open_setup_menu()
@@ -314,24 +319,30 @@ The Gen 1 receiver lives in the `gen1` subpackage and exposes a different API su
 import asyncio
 from anthem_rs232 import Gen1Receiver
 from anthem_rs232.gen1 import (
-    STATEMENT_D2, Source, DecoderMode, EffectMode, SleepTimer,
-    DolbyDynamicRange, TunerMode,
+    STATEMENT_D2,
+    Source,
+    DecoderMode,
+    EffectMode,
+    SleepTimer,
+    DolbyDynamicRange,
+    TunerMode,
 )
+
 
 async def main():
     rx = Gen1Receiver("/dev/ttyUSB0", model=STATEMENT_D2)
-    await rx.connect()                 # opens serial, sends ?, enables SST1 auto-reports
-    await rx.query_state()             # P1?, P2?, P3?, H?, TT?
+    await rx.connect()  # opens serial, sends ?, enables SST1 auto-reports
+    await rx.query_state()  # P1?, P2?, P3?, H?, TT?
 
     state = rx.state
     print(state.model, state.version)  # "Statement D2" "3.10"
-    print(state.main_zone.volume)      # e.g. -30.5
+    print(state.main_zone.volume)  # e.g. -30.5
 
     # Main zone (P1)
-    await rx.main.power_on()           # P1P1
-    await rx.main.set_volume(-30.5)    # P1VM-30.5  (0.5 dB step)
-    await rx.main.mute_toggle()        # P1MT
-    await rx.main.select_source(Source.DVD_1.value)   # P1S5
+    await rx.main.power_on()  # P1P1
+    await rx.main.set_volume(-30.5)  # P1VM-30.5  (0.5 dB step)
+    await rx.main.mute_toggle()  # P1MT
+    await rx.main.select_source(Source.DVD_1.value)  # P1S5
     await rx.main.set_decoder_mode("5", DecoderMode.PRO_LOGIC)
     await rx.main.set_effect_mode("5", EffectMode.HALL)
     await rx.main.set_dolby_dynamic_range(DolbyDynamicRange.LATE_NIGHT)
@@ -358,21 +369,22 @@ async def main():
     await rx.headphone.mute_toggle()
 
     # Tuner (T)
-    await rx.tuner.set_fm_frequency(101.5)   # TFT101.5
-    await rx.tuner.set_am_frequency(540)     # TAT0540
-    await rx.tuner.fm_preset(1, 2)           # TFP12
+    await rx.tuner.set_fm_frequency(101.5)  # TFT101.5
+    await rx.tuner.set_am_frequency(540)  # TAT0540
+    await rx.tuner.fm_preset(1, 2)  # TFP12
     band, freq = await rx.tuner.query_frequency()
 
     # 12 V triggers
-    await rx.set_trigger(1, on=True)         # t1T1
+    await rx.set_trigger(1, on=True)  # t1T1
 
     # System
-    await rx.power_on_all()                  # P1P1;P2P1;P3P1
-    await rx.lock_front_panel()              # FPL1
-    await rx.rename_source("5", "Apple")     # SN5Apple
-    await rx.save_user_settings()            # SfSU
+    await rx.power_on_all()  # P1P1;P2P1;P3P1
+    await rx.lock_front_panel()  # FPL1
+    await rx.rename_source("5", "Apple")  # SN5Apple
+    await rx.save_user_settings()  # SfSU
 
     await rx.disconnect()
+
 
 asyncio.run(main())
 ```

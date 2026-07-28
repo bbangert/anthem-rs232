@@ -30,9 +30,7 @@ _FULL_SOURCE_MAP: dict[str, str] = {
 
 # Smaller source map for the AVM-2 / earlier MRX-class receivers (digits only).
 _BASIC_SOURCE_MAP: dict[str, str] = {
-    code: name
-    for code, name in _FULL_SOURCE_MAP.items()
-    if code.isdigit()
+    code: name for code, name in _FULL_SOURCE_MAP.items() if code.isdigit()
 }
 
 

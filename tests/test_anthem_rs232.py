@@ -8,6 +8,7 @@ from conftest import (
     DEFAULT_QUERY_RESPONSES,
     connect_with_defaults,
 )
+from serialkit import CommandTimeoutError
 
 import anthem_rs232.receiver as anthem_receiver
 from anthem_rs232 import (
@@ -192,9 +193,7 @@ async def test_connect_populates_state(receiver):
 
 async def test_inputs_populated(receiver):
     inputs = receiver.state.inputs
-    assert inputs[1] == InputConfig(
-        index=1, short_name="CBL", long_name="Cable Box"
-    )
+    assert inputs[1] == InputConfig(index=1, short_name="CBL", long_name="Cable Box")
     assert inputs[2] == InputConfig(
         index=2, short_name="BD", long_name="Blu-ray Player"
     )
@@ -210,10 +209,13 @@ async def test_connect_failure_raises_connection_error(mock_serial):
     async def fake_open(*args, **kwargs):
         return mock_serial.reader, mock_serial.writer
 
-    with patch(
-        "anthem_rs232.receiver.serialx.open_serial_connection",
-        side_effect=fake_open,
-    ), pytest.raises(ConnectionError):
+    with (
+        patch(
+            "anthem_rs232.receiver.serialx.open_serial_connection",
+            side_effect=fake_open,
+        ),
+        pytest.raises(ConnectionError),
+    ):
         await recv.connect()
 
 
@@ -233,6 +235,38 @@ async def test_main_power_off(receiver, mock_serial):
 async def test_zone2_power_on(receiver, mock_serial):
     await receiver.zone_2.power_on()
     assert mock_serial.written_data[-1] == b"Z2POW1;"
+
+
+async def test_power_on_resends_when_standby_swallows_the_first_frame(
+    receiver, mock_serial
+):
+    """A receiver in ECO standby consumes the first frame waking its MCU, and
+    says nothing about it. The spec's answer is send / wait / send again, so
+    the second frame is the one that acts — and the caller only returns once
+    the zone actually reports on."""
+    swallowed = []
+
+    def eat_first(cmd: str) -> None:
+        swallowed.append(cmd)
+        if len(swallowed) > 1:  # awake now; the second frame is acknowledged
+            mock_serial.inject_response(cmd)
+
+    mock_serial._command_handler = eat_first
+
+    await receiver.main.power_on()
+
+    assert swallowed == ["Z1POW1", "Z1POW1"]  # sent twice, not burst
+    assert receiver.main.power is True
+
+
+async def test_power_on_raises_when_never_confirmed(receiver, mock_serial):
+    """A receiver that never reports on must surface as a failure rather than
+    a silent success — the command is fire-and-forget on the wire, so nothing
+    else would tell the caller it did not land."""
+    mock_serial._command_handler = lambda cmd: None  # swallow everything
+
+    with pytest.raises(CommandTimeoutError):
+        await receiver.main.power_on()
 
 
 async def test_select_input(receiver, mock_serial):
@@ -469,6 +503,46 @@ async def test_x10_model_skips_unsupported_queries(mock_serial):
     assert b"Z1POW?;" in sent
     assert b"Z1VOL?;" in sent
     await recv.disconnect()
+
+
+async def test_query_state_does_not_pay_a_timeout_per_unanswered_query(
+    mock_serial,
+):
+    """The reason query_state is a sweep: a receiver that answers only some of
+    its queries used to cost a full command timeout for each one it ignored.
+    Now the round ends when the receiver falls quiet, so silence is free."""
+    import time
+
+    # Answer power only; every other query goes unanswered.
+    mock_serial._query_responses = {"Z1POW": ["Z1POW1"]}
+    recv = AnthemReceiver("/dev/ttyUSB0")
+
+    async def fake_open(*args, **kwargs):
+        return mock_serial.reader, mock_serial.writer
+
+    with patch(
+        "anthem_rs232.receiver.serialx.open_serial_connection",
+        side_effect=fake_open,
+    ):
+        await recv.connect()
+        started = time.monotonic()
+        await recv.query_state()
+        elapsed = time.monotonic() - started
+
+    # Roughly two quiet windows plus the ICN round trip — not one command
+    # timeout per unanswered query, which would be an order of magnitude more.
+    assert elapsed < 10 * anthem_receiver.COMMAND_TIMEOUT
+    assert recv.state.main_zone.power is True  # the answered one still landed
+    await recv.disconnect()
+
+
+async def test_query_state_includes_per_input_processing(receiver, mock_serial):
+    """Lip sync and Dolby Volume for the selected input are part of the refresh
+    round; consumers used to have to ask for them separately."""
+    sent = b"".join(mock_serial.written_data)
+    assert b"SLIP00?;" in sent
+    assert b"SDVS00?;" in sent
+    assert b"SDVL00?;" in sent
 
 
 # -- Per-input processing (SLIP / SDVS / SDVL) --

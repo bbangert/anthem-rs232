@@ -123,7 +123,9 @@ class Gen1ReceiverState:
     model: str | None = None
     version: str | None = None
     build_date: str | None = None
-    raw_identify: str | None = None  # full identify string (e.g. "AVM 2,Version 1.00,Jun 26 2000")
+    raw_identify: str | None = (
+        None  # full identify string (e.g. "AVM 2,Version 1.00,Jun 26 2000")
+    )
 
     # Configuration.
     tx_status_enabled: bool | None = None
@@ -139,7 +141,11 @@ class Gen1ReceiverState:
     headphone: HeadphoneState = field(default_factory=HeadphoneState)
     tuner: TunerState = field(default_factory=TunerState)
     triggers: dict[int, TriggerState] = field(
-        default_factory=lambda: {1: TriggerState(), 2: TriggerState(), 3: TriggerState()}
+        default_factory=lambda: {
+            1: TriggerState(),
+            2: TriggerState(),
+            3: TriggerState(),
+        }
     )
 
     def copy(self) -> Gen1ReceiverState:

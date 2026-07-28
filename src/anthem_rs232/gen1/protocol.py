@@ -58,9 +58,7 @@ _HEADPHONE_STATUS_RE = re.compile(
 
 # Single-field responses.
 _POWER_RE = re.compile(r"^P(?P<zone>[1-3])P(?P<state>[01])$")
-_VOLUME_RE = re.compile(
-    r"^P(?P<zone>[1-3])V(?:M)?(?P<volume>[+-]?\d+(?:\.\d+)?)$"
-)
+_VOLUME_RE = re.compile(r"^P(?P<zone>[1-3])V(?:M)?(?P<volume>[+-]?\d+(?:\.\d+)?)$")
 _MUTE_RE = re.compile(r"^P(?P<zone>[1-3])M(?P<state>[01])$")
 _SOURCE_RE = re.compile(r"^P(?P<zone>[1-3])S(?P<source>[0-9a-z])$")
 _DECODER_RE = re.compile(r"^P1D(?P<source>\d)(?P<mode>\d)$")
@@ -146,29 +144,34 @@ def parse_headphone_status(payload: str) -> HeadphoneStatus | None:
 
 
 @dataclass
-class ZoneField:
-    """A simple per-zone field response (power, volume, mute, source)."""
+class ZoneField[T]:
+    """A simple per-zone field response (power, volume, mute, source).
+
+    Generic in the value so a caller reading ``.value`` gets the type the
+    parser produced — a bool for power and mute, a float for volume, the
+    source code for source — rather than having to narrow it.
+    """
 
     zone: int
-    value: object
+    value: T
 
 
-def parse_power(payload: str) -> ZoneField | None:
+def parse_power(payload: str) -> ZoneField[bool] | None:
     m = _POWER_RE.match(payload)
     return ZoneField(int(m["zone"]), m["state"] == "1") if m else None
 
 
-def parse_volume(payload: str) -> ZoneField | None:
+def parse_volume(payload: str) -> ZoneField[float] | None:
     m = _VOLUME_RE.match(payload)
     return ZoneField(int(m["zone"]), float(m["volume"])) if m else None
 
 
-def parse_mute(payload: str) -> ZoneField | None:
+def parse_mute(payload: str) -> ZoneField[bool] | None:
     m = _MUTE_RE.match(payload)
     return ZoneField(int(m["zone"]), m["state"] == "1") if m else None
 
 
-def parse_source(payload: str) -> ZoneField | None:
+def parse_source(payload: str) -> ZoneField[str] | None:
     m = _SOURCE_RE.match(payload)
     return ZoneField(int(m["zone"]), m["source"]) if m else None
 
@@ -236,7 +239,7 @@ class PendingQuery:
     """A pending query waiting for its response."""
 
     matcher: object  # callable returning a non-None decoded value, or None
-    future: asyncio.Future
+    future: asyncio.Future[object]
 
 
 # -- Helpers ----------------------------------------------------------------

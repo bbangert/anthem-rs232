@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import serialx
 from serialkit import (
@@ -41,6 +41,9 @@ from .const import (
     Zone,
 )
 from .protocol import (
+    HeadphoneStatus,
+    MainZoneStatus,
+    ZoneStatus,
     db_to_param,
     match_error,
     parse_am_frequency,
@@ -174,7 +177,7 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
         """
         try:
             await self.identify()
-        except (CommandTimeoutError, Gen1CommandError):
+        except CommandTimeoutError, Gen1CommandError:
             raise ConnectionError(
                 f"No response from receiver on {self._port}"
             ) from None
@@ -287,9 +290,13 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
             raise ValueError(f"Trigger must be 1, 2, or 3: {trigger}")
         result = await self._query(
             f"t{trigger}T?".encode("ascii"),
-            lambda p: parse_trigger(p) if (parse_trigger(p) or (None,))[0] == trigger else None,
+            lambda p: (
+                parse_trigger(p)
+                if (parse_trigger(p) or (None,))[0] == trigger
+                else None
+            ),
         )
-        return result[1]  # type: ignore[index]
+        return result[1]
 
     # -- State population ------------------------------------------------
 
@@ -303,19 +310,19 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
         ):
             try:
                 await fn()
-            except (TimeoutError, Gen1CommandError):
+            except TimeoutError, Gen1CommandError:
                 pass
 
         if self._model is None or self._model.has_headphone:
             try:
                 await self.headphone.query_status()
-            except (TimeoutError, Gen1CommandError):
+            except TimeoutError, Gen1CommandError:
                 pass
 
         if self._model is None or self._model.has_tuner:
             try:
                 await self.tuner.query_frequency()
-            except (TimeoutError, Gen1CommandError):
+            except TimeoutError, Gen1CommandError:
                 pass
 
     # -- Low-level send / query -----------------------------------------
@@ -324,13 +331,13 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
         """Write a raw command to the wire (the LF terminator is appended)."""
         await self.link.send(command + TERMINATOR)
 
-    async def _query(
+    async def _query[T](
         self,
         command: bytes,
-        matcher: Callable[[str], Any | None],
+        matcher: Callable[[str], T | None],
         *,
         timeout: float | None = None,
-    ) -> Any:
+    ) -> T:
         """Send a query and wait for a frame the ``matcher`` callable accepts.
 
         Gen 1 matchers return a decoded value (or ``None`` for no match); the
@@ -348,7 +355,10 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
             match=accepts,
             timeout=self._timeout if timeout is None else timeout,
         )
-        return matcher(frame.decode("ascii", errors="replace").strip())
+        result = matcher(frame.decode("ascii", errors="replace").strip())
+        if result is None:  # pragma: no cover - accepts() already vetted it
+            raise Gen1CommandError(f"could not decode reply to {command!r}")
+        return result
 
     # -- Message processing ---------------------------------------------
 
@@ -384,21 +394,21 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
             return self._apply_headphone_status(hp)
 
         # Single-field updates (P1P, P1V, P1M, P1S, P1D, P1E, ...).
-        f = parse_power(message)
-        if f is not None:
-            return self._apply_zone_field(f.zone, "power", f.value)
+        power = parse_power(message)
+        if power is not None:
+            return self._apply_zone_field(power.zone, "power", power.value)
 
-        f = parse_volume(message)
-        if f is not None:
-            return self._apply_zone_field(f.zone, "volume", f.value)
+        volume = parse_volume(message)
+        if volume is not None:
+            return self._apply_zone_field(volume.zone, "volume", volume.value)
 
-        f = parse_mute(message)
-        if f is not None:
-            return self._apply_zone_field(f.zone, "mute", f.value)
+        mute = parse_mute(message)
+        if mute is not None:
+            return self._apply_zone_field(mute.zone, "mute", mute.value)
 
-        f = parse_source(message)
-        if f is not None:
-            return self._apply_zone_field(f.zone, "source", f.value)
+        source = parse_source(message)
+        if source is not None:
+            return self._apply_zone_field(source.zone, "source", source.value)
 
         decoder = parse_decoder(message)
         if decoder is not None:
@@ -417,13 +427,13 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
         if effect is not None:
             src, mode_int = effect
             try:
-                mode = EffectMode(mode_int)
+                effect_mode = EffectMode(mode_int)
             except ValueError:
                 return False
             key = str(src)
-            if self._state.main_zone.effect_modes.get(key) == mode:
+            if self._state.main_zone.effect_modes.get(key) == effect_mode:
                 return False
-            self._state.main_zone.effect_modes[key] = mode
+            self._state.main_zone.effect_modes[key] = effect_mode
             return True
 
         fm = parse_fm_frequency(message)
@@ -475,7 +485,7 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
             changed = True
         return changed
 
-    def _apply_main_status(self, status) -> bool:
+    def _apply_main_status(self, status: MainZoneStatus) -> bool:
         mz = self._state.main_zone
         changed = False
         if self._set_attr(mz, "source", status.source):
@@ -494,15 +504,18 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
                 changed = True
         if status.effect is not None:
             try:
-                mode = EffectMode(status.effect)
+                effect_mode: EffectMode | None = EffectMode(status.effect)
             except ValueError:
-                mode = None
-            if mode is not None and mz.effect_modes.get(status.source) != mode:
-                mz.effect_modes[status.source] = mode
+                effect_mode = None
+            if (
+                effect_mode is not None
+                and mz.effect_modes.get(status.source) != effect_mode
+            ):
+                mz.effect_modes[status.source] = effect_mode
                 changed = True
         return changed
 
-    def _apply_zone2_status(self, status) -> bool:
+    def _apply_zone2_status(self, status: ZoneStatus) -> bool:
         z2 = self._state.zone_2
         changed = False
         if self._set_attr(z2, "source", status.source):
@@ -513,7 +526,7 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
             changed = True
         return changed
 
-    def _apply_headphone_status(self, status) -> bool:
+    def _apply_headphone_status(self, status: HeadphoneStatus) -> bool:
         h = self._state.headphone
         changed = False
         if self._set_attr(h, "source", status.source):
@@ -532,6 +545,7 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
         if zone == 3 and attr == "source":
             return self._set_attr(self._state.rec, attr, value)
         return False
+
 
 # ---------------------------------------------------------------------------
 # Player abstractions
@@ -584,7 +598,7 @@ class MainPlayer(_BaseZone):
     async def query_power(self) -> bool:
         result = await self._receiver._query(
             b"P1P?",
-            lambda p: parse_power(p) if (f := parse_power(p)) and f.zone == 1 else None,
+            lambda p: f if (f := parse_power(p)) is not None and f.zone == 1 else None,
         )
         return result.value
 
@@ -610,7 +624,7 @@ class MainPlayer(_BaseZone):
     async def query_volume(self) -> float:
         result = await self._receiver._query(
             b"P1VM?",
-            lambda p: parse_volume(p) if (f := parse_volume(p)) and f.zone == 1 else None,
+            lambda p: f if (f := parse_volume(p)) is not None and f.zone == 1 else None,
         )
         return result.value
 
@@ -697,7 +711,7 @@ class MainPlayer(_BaseZone):
     async def query_mute(self) -> bool:
         result = await self._receiver._query(
             b"P1M?",
-            lambda p: parse_mute(p) if (f := parse_mute(p)) and f.zone == 1 else None,
+            lambda p: f if (f := parse_mute(p)) is not None and f.zone == 1 else None,
         )
         return result.value
 
@@ -710,9 +724,7 @@ class MainPlayer(_BaseZone):
 
     async def select_multi_source(self, video_code: str, audio_code: str) -> None:
         """``P1X{v}{a}`` -- D2/D2v independent video/audio source select."""
-        await self._receiver._send(
-            f"P1X{video_code}{audio_code}".encode("ascii")
-        )
+        await self._receiver._send(f"P1X{video_code}{audio_code}".encode("ascii"))
 
     async def source_seek_up(self) -> None:
         await self._receiver._send(b"P1SS+")
@@ -725,16 +737,12 @@ class MainPlayer(_BaseZone):
     async def set_decoder_mode(self, source_code: str, mode: DecoderMode) -> None:
         if len(source_code) != 1:
             raise ValueError("Source code must be a single character")
-        await self._receiver._send(
-            f"P1D{source_code}{mode.value}".encode("ascii")
-        )
+        await self._receiver._send(f"P1D{source_code}{mode.value}".encode("ascii"))
 
     async def set_effect_mode(self, source_code: str, mode: EffectMode) -> None:
         if len(source_code) != 1:
             raise ValueError("Source code must be a single character")
-        await self._receiver._send(
-            f"P1E{source_code}{mode.value}".encode("ascii")
-        )
+        await self._receiver._send(f"P1E{source_code}{mode.value}".encode("ascii"))
 
     async def set_dolby_dynamic_range(self, mode: DolbyDynamicRange) -> None:
         await self._receiver._send(f"P1C{mode.value}".encode("ascii"))
@@ -749,9 +757,7 @@ class MainPlayer(_BaseZone):
         """``P1x{row}{message}`` -- write an OSD message on row 1 or 2."""
         if row not in (1, 2):
             raise ValueError(f"Row must be 1 or 2: {row}")
-        await self._receiver._send(
-            f"P1x{row}{message}".encode("ascii")
-        )
+        await self._receiver._send(f"P1x{row}{message}".encode("ascii"))
 
     async def set_sleep_timer(self, mode: SleepTimer) -> None:
         await self._receiver._send(f"P1Z{mode.value}".encode("ascii"))
@@ -791,7 +797,7 @@ class Zone2Player(_BaseZone):
     async def query_power(self) -> bool:
         result = await self._receiver._query(
             b"P2P?",
-            lambda p: parse_power(p) if (f := parse_power(p)) and f.zone == 2 else None,
+            lambda p: f if (f := parse_power(p)) is not None and f.zone == 2 else None,
         )
         return result.value
 
@@ -812,7 +818,7 @@ class Zone2Player(_BaseZone):
     async def query_volume(self) -> float:
         result = await self._receiver._query(
             b"P2V?",
-            lambda p: parse_volume(p) if (f := parse_volume(p)) and f.zone == 2 else None,
+            lambda p: f if (f := parse_volume(p)) is not None and f.zone == 2 else None,
         )
         return result.value
 
@@ -931,15 +937,11 @@ class Headphone:
 
     async def set_treble(self, db: float) -> None:
         """Headphone treble (``HT``, +/- 14 dB in 2.0 dB steps)."""
-        await self._receiver._send(
-            f"HT{db_to_param(db, step=2.0)}".encode("ascii")
-        )
+        await self._receiver._send(f"HT{db_to_param(db, step=2.0)}".encode("ascii"))
 
     async def set_bass(self, db: float) -> None:
         """Headphone bass (``HB``)."""
-        await self._receiver._send(
-            f"HB{db_to_param(db, step=2.0)}".encode("ascii")
-        )
+        await self._receiver._send(f"HB{db_to_param(db, step=2.0)}".encode("ascii"))
 
 
 class Tuner:
@@ -966,15 +968,11 @@ class Tuner:
 
     async def assign_fm_preset(self, preset_id: str, frequency: float) -> None:
         """``TFS y=zzz.z`` -- assign FM preset ``y`` to frequency ``zzz.z`` MHz."""
-        await self._receiver._send(
-            f"TFS{preset_id}={frequency:.1f}".encode("ascii")
-        )
+        await self._receiver._send(f"TFS{preset_id}={frequency:.1f}".encode("ascii"))
 
     async def assign_am_preset(self, preset_id: str, frequency: int) -> None:
         """``TAS y=zzzz`` -- assign AM preset ``y`` to frequency ``zzzz`` kHz."""
-        await self._receiver._send(
-            f"TAS{preset_id}={frequency}".encode("ascii")
-        )
+        await self._receiver._send(f"TAS{preset_id}={frequency}".encode("ascii"))
 
     async def tune_up(self) -> None:
         await self._receiver._send(b"T+")
@@ -988,7 +986,7 @@ class Tuner:
     async def query_frequency(self) -> tuple[TunerBand, float | int]:
         """Query the current tuner frequency. Returns (band, frequency)."""
 
-        def matcher(p: str):
+        def matcher(p: str) -> tuple[TunerBand, float | int] | None:
             am = parse_am_frequency(p)
             if am is not None:
                 return (TunerBand.AM, am)

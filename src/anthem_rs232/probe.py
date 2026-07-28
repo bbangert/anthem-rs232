@@ -41,8 +41,8 @@ DEFAULT_TIMEOUT = 0.8
 DEFAULT_BAUD_ATTEMPTS: tuple[tuple[int, int], ...] = (
     # (generation, baud)
     (2, 115200),  # Gen 2: MRX 310-1120, AVM 60
-    (1, 9600),    # Gen 1: D1, AVM 20-50, MRX 300/500/700
-    (1, 19200),   # Gen 1: Statement D2, D2v
+    (1, 9600),  # Gen 1: D1, AVM 20-50, MRX 300/500/700
+    (1, 19200),  # Gen 1: Statement D2, D2v
 )
 
 
@@ -67,19 +67,17 @@ def _lookup_model(generation: int, model_name: str) -> object | None:
     """Look up the matching model constant for the detected name."""
     target = model_name.strip().upper()
     if generation == 2:
-        for m in gen2_models.ALL_MODELS:
-            if m.name.upper() == target:
-                return m
+        for gen2_model in gen2_models.ALL_MODELS:
+            if gen2_model.name.upper() == target:
+                return gen2_model
     elif generation == 1:
-        for m in gen1_models.ALL_MODELS:
-            if m.name.upper() == target:
-                return m
+        for gen1_model in gen1_models.ALL_MODELS:
+            if gen1_model.name.upper() == target:
+                return gen1_model
     return None
 
 
-async def _try_gen2(
-    port: str, baud: int, timeout: float
-) -> ProbeResult | None:
+async def _try_gen2(port: str, baud: int, timeout: float) -> ProbeResult | None:
     """Probe for a Gen 2 receiver. Returns None if no recognisable response."""
     try:
         reader, writer = await serialx.open_serial_connection(port, baudrate=baud)
@@ -130,9 +128,7 @@ async def _try_gen2(
         await writer.wait_closed()
 
 
-async def _try_gen1(
-    port: str, baud: int, timeout: float
-) -> ProbeResult | None:
+async def _try_gen1(port: str, baud: int, timeout: float) -> ProbeResult | None:
     """Probe for a Gen 1 receiver. Returns None if no recognisable response."""
     try:
         reader, writer = await serialx.open_serial_connection(port, baudrate=baud)
@@ -173,7 +169,7 @@ async def _read_terminated(
     """Read one terminated frame within ``timeout`` seconds, or return None."""
     try:
         data = await asyncio.wait_for(reader.readuntil(terminator), timeout=timeout)
-    except (TimeoutError, asyncio.IncompleteReadError):
+    except TimeoutError, asyncio.IncompleteReadError:
         return None
     except Exception as exc:  # noqa: BLE001
         _LOGGER.debug("read_terminated error: %s", exc)

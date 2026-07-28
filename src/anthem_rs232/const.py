@@ -14,6 +14,16 @@ WATCHDOG_INTERVAL = 60.0  # seconds without RX before probing the link
 # so probe several times before declaring the link dead.
 WATCHDOG_PROBE_ATTEMPTS = 3
 PROBE_TIMEOUT = 0.8  # seconds to wait for each probe attempt
+# A receiver in ECO standby consumes the first frame waking its MCU, so the
+# spec (note 11) prescribes send / wait for the response / send again rather
+# than a burst. Note 10 puts the host-side floor at 1 s before retransmit.
+POWER_ON_CONFIRM_TIMEOUT = 1.5
+# A refresh round ends when the receiver has been quiet this long. The doc
+# puts command service at 30-100 ms, so 300 ms is several service intervals
+# of silence; SWEEP_TIMEOUT caps the round if it never goes quiet. Both want
+# validating against real hardware.
+SWEEP_QUIET = 0.3
+SWEEP_TIMEOUT = 10.0
 TERMINATOR = b";"
 
 # Maximum number of input configurations the receiver can expose.
