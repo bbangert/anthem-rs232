@@ -497,7 +497,7 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
                 return prefix
         return None
 
-    def _apply_event(self, prefix: str, param: str) -> bool:  # noqa: PLR0911 -- dispatcher
+    def _apply_event(self, prefix: str, param: str) -> bool:
         """Update state from an event/response. Returns True when state changed."""
         # Identification
         if prefix == "IDM":
@@ -740,12 +740,14 @@ class AnthemReceiver(ReceiverRuntime[ReceiverState]):
         """Handle Z?POW events. Z0POW updates every zone."""
         on = param == "1"
         changed = False
-        if prefix in ("Z1POW", "Z0POW"):
-            if self._set_attr_value(self._state.main_zone, "power", on):
-                changed = True
-        if prefix in ("Z2POW", "Z0POW"):
-            if self._set_attr_value(self._state.zone_2, "power", on):
-                changed = True
+        if prefix in ("Z1POW", "Z0POW") and self._set_attr_value(
+            self._state.main_zone, "power", on
+        ):
+            changed = True
+        if prefix in ("Z2POW", "Z0POW") and self._set_attr_value(
+            self._state.zone_2, "power", on
+        ):
+            changed = True
         # Update aggregate chassis power: True if any zone is on, False if none.
         zones_on = [self._state.main_zone.power, self._state.zone_2.power]
         if any(z is True for z in zones_on):

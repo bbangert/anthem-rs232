@@ -28,7 +28,7 @@ anthem-rs232 = "anthem_rs232.__main__:main"
 anthem-rs232-probe = "anthem_rs232.probe:main"
 
 [project.urls]
-Repository = "https://github.com/home-assistant-libs/anthem-rs232"
+Repository = "https://github.com/bbangert/anthem-rs232"
 
 [build-system]
 requires = ["uv_build>=0.8.4,<0.9.0"]

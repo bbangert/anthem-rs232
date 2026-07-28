@@ -359,7 +359,7 @@ class Gen1Receiver(ReceiverRuntime[Gen1ReceiverState]):
         setattr(target, attr, value)
         return True
 
-    def _apply_event(self, message: str) -> bool:  # noqa: PLR0911
+    def _apply_event(self, message: str) -> bool:
         """Update state from a received frame. Returns True when state changed."""
         # Identify response: ``(AVM 2,Version 1.00,Jun 26 2000)``.
         info = parse_version(message)
